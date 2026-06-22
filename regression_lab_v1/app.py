@@ -312,12 +312,95 @@ with tabs[2]:
         selected = st.multiselect("Variables para graficar", cols, default=cols[: min(4, len(cols))])
         if selected:
             plot_df = work[[c for c in ["Fecha", entity_col] if c] + selected].copy()
+
+            col_a, col_b, col_c = st.columns([1.4, 1.2, 1])
+            if entity_col:
+                graph_mode = col_a.selectbox(
+                    "Formato del gráfico",
+                    [
+                        "Variables separadas · bancos como líneas",
+                        "Bancos separados · variables como líneas",
+                    ],
+                    index=0,
+                )
+            else:
+                graph_mode = "Variables separadas"
+            independent_y = col_b.checkbox("Escala Y independiente", value=True)
+            normalize_100 = col_c.checkbox("Normalizar índice 100", value=False)
+
             if entity_col:
                 long = plot_df.melt(id_vars=["Fecha", entity_col], value_vars=selected, var_name="variable", value_name="valor")
-                fig = px.line(long, x="Fecha", y="valor", color="variable", facet_row=entity_col, title="Series por banco")
+                long = long.sort_values([entity_col, "variable", "Fecha"])
+                if normalize_100:
+                    def _index_100(s: pd.Series) -> pd.Series:
+                        valid = s.dropna()
+                        if valid.empty or valid.iloc[0] == 0:
+                            return s * np.nan
+                        return s / valid.iloc[0] * 100
+                    long["valor"] = long.groupby([entity_col, "variable"], sort=False)["valor"].transform(_index_100)
+                    y_title = "Índice 100"
+                else:
+                    y_title = "valor"
+
+                if graph_mode.startswith("Variables separadas"):
+                    n_cols = 2 if len(selected) > 1 else 1
+                    height = max(520, 330 * math.ceil(len(selected) / n_cols))
+                    fig = px.line(
+                        long,
+                        x="Fecha",
+                        y="valor",
+                        color=entity_col,
+                        facet_col="variable",
+                        facet_col_wrap=n_cols,
+                        title="Series por variable",
+                        labels={"valor": y_title},
+                    )
+                else:
+                    bancos = long[entity_col].nunique()
+                    height = max(520, 280 * bancos)
+                    fig = px.line(
+                        long,
+                        x="Fecha",
+                        y="valor",
+                        color="variable",
+                        facet_row=entity_col,
+                        title="Series por banco",
+                        labels={"valor": y_title},
+                    )
             else:
                 long = plot_df.melt(id_vars=["Fecha"], value_vars=selected, var_name="variable", value_name="valor")
-                fig = px.line(long, x="Fecha", y="valor", color="variable", title="Series temporales")
+                long = long.sort_values(["variable", "Fecha"])
+                if normalize_100:
+                    def _index_100_ts(s: pd.Series) -> pd.Series:
+                        valid = s.dropna()
+                        if valid.empty or valid.iloc[0] == 0:
+                            return s * np.nan
+                        return s / valid.iloc[0] * 100
+                    long["valor"] = long.groupby("variable", sort=False)["valor"].transform(_index_100_ts)
+                    y_title = "Índice 100"
+                else:
+                    y_title = "valor"
+                n_cols = 2 if len(selected) > 1 else 1
+                height = max(520, 330 * math.ceil(len(selected) / n_cols))
+                fig = px.line(
+                    long,
+                    x="Fecha",
+                    y="valor",
+                    color="variable",
+                    facet_col="variable",
+                    facet_col_wrap=n_cols,
+                    title="Series temporales",
+                    labels={"valor": y_title},
+                )
+
+            if independent_y:
+                fig.update_yaxes(matches=None, showticklabels=True)
+            fig.for_each_annotation(lambda a: a.update(text=a.text.split("=")[-1]))
+            fig.update_layout(
+                height=height,
+                margin=dict(l=40, r=30, t=70, b=45),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            )
             st.plotly_chart(fig, use_container_width=True)
 
         st.markdown("**Estadísticos descriptivos**")
