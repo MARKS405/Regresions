@@ -147,6 +147,161 @@ def render_metric_row(metrics: dict):
     c5.metric("AIC/BIC", f"{metrics.get('aic', np.nan):.1f} / {metrics.get('bic', np.nan):.1f}" if pd.notna(metrics.get('aic', np.nan)) else "—")
 
 
+def safe_num(val, digits=4, pct=False):
+    try:
+        if val is None or (isinstance(val, float) and not np.isfinite(val)):
+            return "—"
+        if pct:
+            return f"{val:.{digits}%}"
+        return f"{val:.{digits}f}"
+    except Exception:
+        return "—"
+
+
+def significance_stars(p):
+    try:
+        if p < 0.01:
+            return '***'
+        if p < 0.05:
+            return '**'
+        if p < 0.10:
+            return '*'
+    except Exception:
+        pass
+    return ''
+
+
+def prettify_coef_table(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    out = df.copy()
+    if 'variable' in out.columns:
+        out = out.rename(columns={'variable': 'Variable'})
+    if 'coef' in out.columns:
+        out['Coef.'] = out['coef'].map(lambda x: round(x, 4) if pd.notna(x) else x)
+    if 'std_err' in out.columns:
+        out['Err. Est.'] = out['std_err'].map(lambda x: round(x, 4) if pd.notna(x) else x)
+    if 't_stat' in out.columns:
+        out['t-stat'] = out['t_stat'].map(lambda x: round(x, 3) if pd.notna(x) else x)
+    if 'p_value' in out.columns:
+        out['p-valor'] = out['p_value'].map(lambda x: round(x, 4) if pd.notna(x) else x)
+        out['Sig.'] = out['p_value'].map(significance_stars)
+    if 'ci_low' in out.columns:
+        out['LI 95%'] = out['ci_low'].map(lambda x: round(x, 4) if pd.notna(x) else x)
+    if 'ci_high' in out.columns:
+        out['LS 95%'] = out['ci_high'].map(lambda x: round(x, 4) if pd.notna(x) else x)
+    preferred = [c for c in ['Variable', 'Coef.', 'Err. Est.', 't-stat', 'p-valor', 'Sig.', 'LI 95%', 'LS 95%'] if c in out.columns]
+    return out[preferred]
+
+
+def summary_snapshot(result_obj, metrics: dict, data_type: str) -> dict:
+    snap = {
+        'Observaciones': metrics.get('nobs'),
+        'RMSE': metrics.get('rmse'),
+        'R²': metrics.get('r2'),
+        'R² ajustado': metrics.get('r2_adj'),
+        'AIC': metrics.get('aic'),
+        'BIC': metrics.get('bic'),
+    }
+    try:
+        if hasattr(result_obj, 'fvalue'):
+            snap['F-stat'] = float(result_obj.fvalue) if result_obj.fvalue is not None else np.nan
+    except Exception:
+        pass
+    try:
+        if hasattr(result_obj, 'f_pvalue'):
+            snap['Prob(F)'] = float(result_obj.f_pvalue) if result_obj.f_pvalue is not None else np.nan
+    except Exception:
+        pass
+    try:
+        if hasattr(result_obj, 'loglik'):
+            snap['Log-likelihood'] = float(result_obj.loglik)
+    except Exception:
+        pass
+    try:
+        if data_type == 'Panel' and hasattr(result_obj, 'entity_info'):
+            ent = result_obj.entity_info
+            if isinstance(ent, pd.Series):
+                snap['Entidades'] = ent.get('total', np.nan)
+    except Exception:
+        pass
+    return snap
+
+
+def plot_model_comparison(model_df: pd.DataFrame, target: str, series_cols: list[str], panel: bool, title: str):
+    cols_plot = [c for c in series_cols if c in model_df.columns]
+    nice_names = {target: target, f'estimado_{target}': 'Estimado', **{c: c.replace(f'estimado_{target}_', '').replace('_', ' ').title() for c in cols_plot}}
+    color_map = {
+        target: '#2B2B2B',
+        f'estimado_{target}': '#1f77b4',
+    }
+    # assign BCRP red to first extra scenario, then violet/orange if needed
+    extras = [c for c in cols_plot if c not in [target, f'estimado_{target}']]
+    extra_palette = ['#8A1538', '#9467bd', '#ff7f0e', '#2ca02c']
+    for c, col in zip(extras, extra_palette):
+        color_map[c] = col
+
+    if panel:
+        plot_long = model_df[['Banco', 'Fecha'] + cols_plot].melt(
+            id_vars=['Banco', 'Fecha'], value_vars=cols_plot, var_name='serie', value_name='valor'
+        )
+        bancos = plot_long['Banco'].dropna().unique().tolist()
+        n_cols = 2 if len(bancos) > 1 else 1
+        height = max(520, 320 * math.ceil(len(bancos) / n_cols))
+        fig = px.line(
+            plot_long,
+            x='Fecha', y='valor', color='serie',
+            facet_col='Banco', facet_col_wrap=n_cols,
+            color_discrete_map=color_map,
+            title=title,
+            labels={'valor': target, 'serie': 'Serie'}
+        )
+        fig.update_yaxes(matches=None, showticklabels=True)
+        fig.for_each_annotation(lambda a: a.update(text=a.text.split('=')[-1]))
+    else:
+        fig = px.line(
+            model_df,
+            x='Fecha', y=cols_plot,
+            color_discrete_map=color_map,
+            title=title,
+            labels={'value': target, 'variable': 'Serie'}
+        )
+        height = 520
+
+    rename_map = {k: nice_names.get(k, k) for k in cols_plot}
+    fig.for_each_trace(lambda tr: tr.update(name=rename_map.get(tr.name, tr.name), line=dict(width=2.6)))
+    for tr in fig.data:
+        if tr.name in ['Estimado']:
+            tr.update(line=dict(dash='dash', width=2.5))
+        if tr.name not in [nice_names.get(target, target), 'Estimado']:
+            tr.update(line=dict(dash='dot', width=2.7))
+    fig.update_layout(
+        template='plotly_white',
+        height=height,
+        margin=dict(l=40, r=20, t=80, b=40),
+        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0),
+        hovermode='x unified',
+    )
+    return fig
+
+
+def render_presentable_summary(last: dict):
+    st.markdown('**Resumen ejecutivo del modelo**')
+    snap = summary_snapshot(last['result_obj'], last['metrics'], last['type'])
+    cols = st.columns(4)
+    items = list(snap.items())
+    for i, (k, v) in enumerate(items[:8]):
+        txt = safe_num(v, digits=4) if isinstance(v, (float, int, np.floating, np.integer)) else str(v)
+        cols[i % 4].metric(k, txt if txt != 'nan' else '—')
+
+    st.markdown('**Tabla de coeficientes**')
+    pretty = prettify_coef_table(last['coef_df'])
+    st.dataframe(pretty, use_container_width=True, hide_index=True)
+
+    with st.expander('Ver summary técnico completo', expanded=False):
+        st.text(model_summary_text(last['result_obj'], last['type']))
+
+
 init_state()
 
 # ---------------------------
@@ -594,10 +749,7 @@ with tabs[5]:
         st.warning("Corre un modelo en la pestaña Modelo.")
     else:
         render_metric_row(last["metrics"])
-        st.markdown("**Coeficientes**")
-        st.dataframe(last["coef_df"], use_container_width=True)
-        st.markdown("**Summary**")
-        st.text(model_summary_text(last["result_obj"], last["type"]))
+        render_presentable_summary(last)
 
         st.markdown("**Interpretación ejecutiva**")
         st.write(executive_interpretation(
@@ -611,13 +763,13 @@ with tabs[5]:
         target = last["target_var"]
         est_col = f"estimado_{target}"
         if est_col in model_df.columns and target in model_df.columns:
-            if last["type"] == "Panel":
-                plot_long = model_df[["Banco", "Fecha", target, est_col]].melt(
-                    id_vars=["Banco", "Fecha"], value_vars=[target, est_col], var_name="serie", value_name="valor"
-                )
-                fig = px.line(plot_long, x="Fecha", y="valor", color="serie", facet_row="Banco", title=f"{target} real vs estimado")
-            else:
-                fig = px.line(model_df, x="Fecha", y=[target, est_col], title=f"{target} real vs estimado")
+            fig = plot_model_comparison(
+                model_df=model_df,
+                target=target,
+                series_cols=[target, est_col],
+                panel=(last["type"] == "Panel"),
+                title=f"{target} real vs estimado",
+            )
             st.plotly_chart(fig, use_container_width=True)
 
         st.markdown("**Contribución promedio por regresora**")
@@ -660,13 +812,13 @@ with tabs[6]:
                 st.success("Contrafactual construido.")
                 target = last["target_var"]
                 cols_plot = [target, f"estimado_{target}", f"estimado_{target}_{cf_name}"]
-                if last["type"] == "Panel":
-                    plot_long = cf_df[["Banco", "Fecha"] + cols_plot].melt(
-                        id_vars=["Banco", "Fecha"], value_vars=cols_plot, var_name="serie", value_name="valor"
-                    )
-                    fig = px.line(plot_long, x="Fecha", y="valor", color="serie", facet_row="Banco", title=f"Contrafactual: {cf_name}")
-                else:
-                    fig = px.line(cf_df, x="Fecha", y=cols_plot, title=f"Contrafactual: {cf_name}")
+                fig = plot_model_comparison(
+                    model_df=cf_df,
+                    target=target,
+                    series_cols=cols_plot,
+                    panel=(last["type"] == "Panel"),
+                    title=f"Contrafactual: {target} · {cf_name}",
+                )
                 st.plotly_chart(fig, use_container_width=True)
                 st.dataframe(cf_df[[c for c in ["Banco", "Fecha"] if c in cf_df.columns] + cols_plot].dropna(how="all"), use_container_width=True)
             except Exception as exc:
