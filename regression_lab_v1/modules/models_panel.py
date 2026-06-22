@@ -28,7 +28,7 @@ def prepare_panel_data(
     data[date_col] = pd.to_datetime(data[date_col], errors="coerce")
     for c in [y_var] + x_vars:
         data[c] = pd.to_numeric(data[c], errors="coerce")
-    data = data.replace([np.inf, -np.inf], np.nan).dropna()
+    data = data.replace([np.inf, -np.inf], np.nan).fillna(0)
     data = data.sort_values([entity_col, date_col]).set_index([entity_col, date_col])
     return data
 
