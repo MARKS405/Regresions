@@ -56,3 +56,115 @@ def transform_panel_notebook_format(
 
     out = out.sort_values([entity_col, date_col]).reset_index(drop=True)
     return out
+
+
+def transform_panel_long_format(
+    df: pd.DataFrame,
+    entity_col: str = "Entidad",
+    date_col: str = "Fecha",
+    output_entity_col: str = "Banco",
+    output_date_col: str = "Fecha",
+    drop_cols: Optional[Iterable[str]] = None,
+) -> pd.DataFrame:
+    """Transform panel format that is already tidy/long: one row per
+    Entidad-Fecha, with variables already as columns (e.g. BD_tasas: Cdg, Fecha,
+    Nro, Entidad, TEA_Tarjeta, ...). No melt/pivot is needed here — this only
+    normalizes types, drops helper/id columns, and renames entity/date columns
+    to match the convention the rest of the app expects (Banco/Fecha).
+
+    - Values that are not numeric (e.g. "-" placeholders) become NaN.
+    - Rows with a missing entity or an unparseable date are dropped.
+    """
+    required = {entity_col, date_col}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"Faltan columnas requeridas para panel: {missing}")
+
+    out = df.copy()
+
+    drop_cols = [c for c in (drop_cols or []) if c in out.columns and c not in {entity_col, date_col}]
+    if drop_cols:
+        out = out.drop(columns=drop_cols)
+
+    out[date_col] = pd.to_datetime(out[date_col], errors="coerce")
+    out[entity_col] = out[entity_col].astype(str).str.strip()
+    out = out[out[entity_col] != ""]
+    out = out.dropna(subset=[date_col, entity_col])
+
+    value_cols = [c for c in out.columns if c not in {entity_col, date_col}]
+    for c in value_cols:
+        out[c] = pd.to_numeric(out[c], errors="coerce")
+
+    rename_map = {}
+    if entity_col != output_entity_col:
+        rename_map[entity_col] = output_entity_col
+    if date_col != output_date_col:
+        rename_map[date_col] = output_date_col
+    if rename_map:
+        out = out.rename(columns=rename_map)
+
+    out = out.sort_values([output_entity_col, output_date_col]).reset_index(drop=True)
+    return out
+
+
+def detect_panel_format(
+    df: pd.DataFrame,
+    variable_col: str = "Variable",
+    entity_col_notebook: str = "Banco",
+    entity_col_long: str = "Entidad",
+    date_col: str = "Fecha",
+) -> str:
+    """Detect which of the two supported panel structures a raw sheet has:
+
+    - "notebook": columns `Variable` + an entity column, dates as columns (wide).
+      e.g. Data_Panel.xlsx / Datos_1.
+    - "long": columns `Fecha` + an entity column, variables already as columns.
+      e.g. BD_tasas.xlsx / BD.
+    - "unknown": neither pattern matches.
+    """
+    cols = set(df.columns)
+    has_entity = entity_col_notebook in cols or entity_col_long in cols
+
+    if variable_col in cols and has_entity:
+        return "notebook"
+    if date_col in cols and has_entity:
+        return "long"
+    return "unknown"
+
+
+def transform_panel_auto(
+    df: pd.DataFrame,
+    macro_vars: Optional[Iterable[str]] = None,
+    variable_col: str = "Variable",
+    entity_col_notebook: str = "Banco",
+    entity_col_long: str = "Entidad",
+    date_col: str = "Fecha",
+    output_entity_col: str = "Banco",
+    drop_cols: Optional[Iterable[str]] = None,
+) -> pd.DataFrame:
+    """Detect the panel format and dispatch to the matching transformer."""
+    fmt = detect_panel_format(df, variable_col, entity_col_notebook, entity_col_long, date_col)
+
+    if fmt == "notebook":
+        entity_col = entity_col_notebook if entity_col_notebook in df.columns else entity_col_long
+        return transform_panel_notebook_format(
+            df,
+            macro_vars=macro_vars,
+            variable_col=variable_col,
+            entity_col=entity_col,
+            date_col=date_col,
+        )
+    if fmt == "long":
+        entity_col = entity_col_long if entity_col_long in df.columns else entity_col_notebook
+        return transform_panel_long_format(
+            df,
+            entity_col=entity_col,
+            date_col=date_col,
+            output_entity_col=output_entity_col,
+            drop_cols=drop_cols,
+        )
+    raise ValueError(
+        "No se pudo detectar el formato del panel. Se esperaba columnas "
+        f"'{variable_col}' + entidad ('{entity_col_notebook}'/'{entity_col_long}') para formato notebook, "
+        f"o '{date_col}' + entidad con variables como columnas para formato long."
+    )
