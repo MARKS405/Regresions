@@ -10,7 +10,11 @@ import plotly.express as px
 import streamlit as st
 
 from modules.data_loader import get_sheet_names, load_excel_sheet, detect_data_type, validate_monthly_dates
-from modules.panel_transformer import transform_panel_notebook_format
+from modules.panel_transformer import (
+    transform_panel_notebook_format,
+    transform_panel_long_format,
+    detect_panel_format,
+)
 from modules.variable_transformer import (
     infer_numeric_columns,
     infer_dummy_columns,
@@ -361,19 +365,68 @@ with tabs[0]:
             st.dataframe(raw.head(20), use_container_width=True)
 
             if data_type == "Panel":
-                variables = sorted(raw["Variable"].dropna().astype(str).unique().tolist()) if "Variable" in raw.columns else []
-                default_macro = [v for v in ["PBI", "TasaBCRP"] if v in variables]
-                macro_vars = st.multiselect(
-                    "Variables macro a replicar por fecha en todos los bancos",
-                    variables,
-                    default=default_macro,
+                detected_fmt = detect_panel_format(raw)
+                fmt_options = [
+                    "Notebook (Variable + Banco, fechas como columnas)",
+                    "Long / tidy (Entidad o Banco + Fecha, variables como columnas)",
+                ]
+                fmt_index = 1 if detected_fmt == "long" else 0
+                panel_fmt_label = st.radio(
+                    "Formato de la base panel",
+                    fmt_options,
+                    index=fmt_index,
+                    horizontal=True,
+                    help="Se detectó automáticamente el formato más probable según las columnas de la hoja; puedes cambiarlo si no calza.",
                 )
-                st.session_state["macro_vars"] = macro_vars
-                if st.button("Preparar panel"):
-                    base = transform_panel_notebook_format(raw, macro_vars=macro_vars)
-                    st.session_state["base_df"] = base
-                    st.success("Panel transformado correctamente.")
-                    st.dataframe(base.head(30), use_container_width=True)
+                is_notebook_fmt = panel_fmt_label == fmt_options[0]
+
+                if is_notebook_fmt:
+                    variables = sorted(raw["Variable"].dropna().astype(str).unique().tolist()) if "Variable" in raw.columns else []
+                    default_macro = [v for v in ["PBI", "TasaBCRP"] if v in variables]
+                    macro_vars = st.multiselect(
+                        "Variables macro a replicar por fecha en todos los bancos",
+                        variables,
+                        default=default_macro,
+                    )
+                    st.session_state["macro_vars"] = macro_vars
+                    if st.button("Preparar panel"):
+                        base = transform_panel_notebook_format(raw, macro_vars=macro_vars)
+                        st.session_state["base_df"] = base
+                        st.success("Panel transformado correctamente.")
+                        st.dataframe(base.head(30), use_container_width=True)
+                else:
+                    all_cols = raw.columns.tolist()
+                    entity_guess = "Entidad" if "Entidad" in all_cols else ("Banco" if "Banco" in all_cols else all_cols[0])
+                    date_guess = "Fecha" if "Fecha" in all_cols else all_cols[0]
+                    col_a, col_b = st.columns(2)
+                    entity_col_sel = col_a.selectbox(
+                        "Columna de entidad (banco/entidad)",
+                        all_cols,
+                        index=all_cols.index(entity_guess),
+                    )
+                    date_col_sel = col_b.selectbox(
+                        "Columna de fecha",
+                        all_cols,
+                        index=all_cols.index(date_guess),
+                    )
+                    id_like_default = [c for c in ["Cdg", "Nro", "Codigo", "Código"] if c in all_cols]
+                    drop_cols_sel = st.multiselect(
+                        "Columnas a excluir (IDs auxiliares, no variables del modelo)",
+                        [c for c in all_cols if c not in {entity_col_sel, date_col_sel}],
+                        default=id_like_default,
+                        help="Ej. códigos internos (Cdg, Nro) que no deben tratarse como variables numéricas.",
+                    )
+                    st.session_state["macro_vars"] = []
+                    if st.button("Preparar panel"):
+                        base = transform_panel_long_format(
+                            raw,
+                            entity_col=entity_col_sel,
+                            date_col=date_col_sel,
+                            drop_cols=drop_cols_sel,
+                        )
+                        st.session_state["base_df"] = base
+                        st.success("Panel transformado correctamente.")
+                        st.dataframe(base.head(30), use_container_width=True)
             else:
                 if st.button("Preparar serie agregada"):
                     base = validate_monthly_dates(raw, date_col="Fecha")
